@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: copyright
+        name: update Python copyrights
+        entry: >-
+          python3 -c 'import pathlib,re,sys; pattern=r"^# (?:Required Notice: )?Copyright \d{4}(?:-\d{4})? EURECOM(?: \(https://www\.eurecom\.fr/\))?\n(?:#.*\n)*"; header="# Required Notice: Copyright 2026 EURECOM (https://www.eurecom.fr/)\n#\n"; [pathlib.Path(p).write_text(re.sub(pattern,header,t,count=1,flags=re.M) if re.search(pattern,t,re.M) else header+"\n"+t) for p in sys.argv[1:] for t in [pathlib.Path(p).read_text()]]'
+        language: system
+        types: [python]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

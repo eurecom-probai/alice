@@ -1,0 +1,230 @@
+name: tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Select trusted execution path
+        id: route
+        env:
+          COPYBARA_APP_SLUG: ${{ vars.COPYBARA_APP_SLUG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+              event = json.load(handle)
+
+          mode = "normal"
+          if os.environ["GITHUB_EVENT_NAME"] == "pull_request" and event["repository"]["full_name"] == "eurecom-probai/alice-internal":
+              pull = event["pull_request"]
+              slug = os.environ.get("COPYBARA_APP_SLUG", "")
+              expected_login = f"{slug}[bot]" if slug else ""
+              login = pull["user"]["login"]
+              branch = pull["head"]["ref"]
+              reserved_branch = branch.startswith("copybara/public-pr-")
+              expected_app = bool(expected_login) and login == expected_login
+
+              if reserved_branch or expected_app:
+                  valid = (
+                      bool(slug)
+                      and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", slug) is not None
+                      and pull["user"]["type"] == "Bot"
+                      and expected_app
+                      and re.fullmatch(r"copybara/public-pr-[1-9][0-9]*", branch) is not None
+                      and pull["base"]["ref"] == "main"
+                      and pull["head"]["repo"]["full_name"] == "eurecom-probai/alice-internal"
+                  )
+                  mode = "copybara" if valid else "reject"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"mode={mode}\n")
+          PY
+
+      - name: Reject malformed reserved import PR
+        if: steps.route.outputs.mode == 'reject'
+        shell: bash
+        run: |
+          echo "::error::Reserved Copybara PR identity or branch validation failed"
+          exit 1
+
+      - name: Validate Copybara provenance without checkout
+        if: steps.route.outputs.mode == 'copybara'
+        env:
+          API_TOKEN: ${{ github.token }}
+          COPYBARA_APP_SLUG: ${{ vars.COPYBARA_APP_SLUG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          INTERNAL_REPOSITORY = "eurecom-probai/alice-internal"
+          PUBLIC_REPOSITORY = "eurecom-probai/alice"
+          SYNC_NAME = "EURECOM Copybara Sync"
+          SYNC_EMAIL = "noreply@eurecom.fr"
+
+          def fail(message):
+              raise SystemExit(f"::error::{message}")
+
+          def api(path):
+              request = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {os.environ['API_TOKEN']}",
+                      "User-Agent": "eurecom-copybara-provenance-check",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except Exception as error:
+                  fail(f"GitHub provenance query failed: {type(error).__name__}")
+
+          def metadata_values(text, key):
+              if not isinstance(text, str):
+                  return []
+              prefix = f"{key}: "
+              return [line[len(prefix):] for line in text.splitlines() if line.startswith(prefix)]
+
+          def require_one(text, key, expected):
+              if metadata_values(text, key) != [expected]:
+                  fail(f"missing, duplicate, or unexpected {key} metadata")
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+              event = json.load(handle)
+          event_pull = event["pull_request"]
+          internal_number = event_pull["number"]
+          event_head = event_pull["head"]["sha"]
+          if re.fullmatch(r"[0-9a-f]{40}", event_head) is None:
+              fail("internal PR head is not a lowercase 40-hex SHA")
+
+          pull = api(f"/repos/{INTERNAL_REPOSITORY}/pulls/{internal_number}")
+          expected_login = f"{os.environ['COPYBARA_APP_SLUG']}[bot]"
+          branch = pull["head"]["ref"]
+          branch_match = re.fullmatch(r"copybara/public-pr-([1-9][0-9]*)", branch)
+          if branch_match is None:
+              fail("internal PR does not use the reserved Copybara branch")
+          public_number = int(branch_match.group(1))
+
+          if (
+              pull["state"] != "open"
+              or pull["base"]["ref"] != "main"
+              or pull["head"]["repo"]["full_name"] != INTERNAL_REPOSITORY
+              or pull["head"]["sha"] != event_head
+              or pull["user"]["login"] != expected_login
+              or pull["user"]["type"] != "Bot"
+              or pull["title"] != f"Import public PR #{public_number}"
+          ):
+              fail("live internal PR identity or exact head validation failed")
+
+          commit = api(f"/repos/{INTERNAL_REPOSITORY}/commits/{event_head}")
+          if commit["sha"] != event_head:
+              fail("GitHub returned the wrong internal commit")
+          parents = commit.get("parents", [])
+          if len(parents) != 1 or parents[0].get("sha") != pull["base"]["sha"]:
+              fail("Copybara review commit is not directly based on current internal main")
+
+          author = commit["commit"]["author"]
+          if author.get("name") != SYNC_NAME or author.get("email") != SYNC_EMAIL:
+              fail("Copybara review commit has an unexpected author")
+
+          body = pull.get("body")
+          message = commit["commit"].get("message")
+          message_lines = message.splitlines() if isinstance(message, str) else []
+          if not message_lines or message_lines[0] != "Import approved public pull request":
+              fail("Copybara review commit has an unexpected subject")
+
+          source_url = f"https://github.com/{PUBLIC_REPOSITORY}/pull/{public_number}"
+          for text in (body, message):
+              require_one(text, "Public-PR-Number", str(public_number))
+              require_one(text, "Public-PR-URL", source_url)
+
+          body_heads = metadata_values(body, "Public-PR-Head")
+          message_heads = metadata_values(message, "Public-PR-Head")
+          if len(body_heads) != 1 or body_heads != message_heads:
+              fail("public head metadata is missing, duplicated, or inconsistent")
+          public_head = body_heads[0]
+          if re.fullmatch(r"[0-9a-f]{40}", public_head) is None:
+              fail("public head metadata is not a lowercase 40-hex SHA")
+
+          body_contributors = metadata_values(body, "Authenticated-GitHub-Contributor")
+          message_contributors = metadata_values(message, "Authenticated-GitHub-Contributor")
+          if len(body_contributors) != 1 or body_contributors != message_contributors:
+              fail("authenticated contributor metadata is missing, duplicated, or inconsistent")
+          if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", body_contributors[0]) is None:
+              fail("authenticated contributor metadata is malformed")
+
+          body_integrations = metadata_values(body, "COPYBARA_INTEGRATE_REVIEW")
+          message_integrations = metadata_values(message, "COPYBARA_INTEGRATE_REVIEW")
+          if len(body_integrations) != 1 or body_integrations != message_integrations:
+              fail("integration metadata is missing, duplicated, or inconsistent")
+          integration = body_integrations[0]
+          prefix = f"{source_url} from "
+          suffix = f" {public_head}"
+          head_label = integration[len(prefix):-len(suffix)] if integration.startswith(prefix) and integration.endswith(suffix) else ""
+          if re.fullmatch(r"[^\s\r\n]{1,200}", head_label) is None:
+              fail("integration metadata does not bind the exact public PR and head")
+
+          print(f"Verified trusted Copybara provenance for public PR #{public_number} at {public_head}")
+          PY
+
+      - name: Check out source
+        if: steps.route.outputs.mode == 'normal'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        if: steps.route.outputs.mode == 'normal'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        if: steps.route.outputs.mode == 'normal'
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        if: steps.route.outputs.mode == 'normal'
+        run: uv sync --locked --group dev
+
+      - name: Run tests
+        if: steps.route.outputs.mode == 'normal'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: uv run pytest
+
+      - name: Build package
+        if: steps.route.outputs.mode == 'normal'
+        run: uv build

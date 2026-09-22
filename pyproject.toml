@@ -1,0 +1,40 @@
+[project]
+name = "alice"
+version = "0.1.0"
+description = "ALICE inference package with mutual-information estimation"
+readme = "README.md"
+authors = [
+    { name = "Simone Rossi", email = "simone.rossi@eurecom.fr" },
+    { name = "Giulio Franzese", email = "giulio.franzese@eurecom.fr" },
+    { name = "Pietro Michiardi", email = "pietro.michiardi@eurecom.fr" },
+]
+requires-python = ">=3.14"
+dependencies = [
+    "torch>=2.12.0",
+    "transformers>=5.11.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-sugar>=1.1.0",
+    "pytest-xdist>=3.8.0",
+]
+notebooks = [
+    "ipykernel>=6.29.0",
+    "jupyterlab>=4.4.0",
+    "matplotlib>=3.10.0",
+    "nbconvert>=7.16.0",
+    "tueplots>=0.2.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-n auto --dist load -ra --color=yes"
+markers = [
+    "integration: tests that load a real Hugging Face checkpoint",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
