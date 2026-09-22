@@ -86,8 +86,8 @@ jobs:
 
           INTERNAL_REPOSITORY = "eurecom-probai/alice-internal"
           PUBLIC_REPOSITORY = "eurecom-probai/alice"
-          SYNC_NAME = "EURECOM Copybara Sync"
-          SYNC_EMAIL = "noreply@eurecom.fr"
+          SYNC_NAME = "eurecom-copybara-sync[bot]"
+          SYNC_EMAIL = "332560217+eurecom-copybara-sync[bot]@users.noreply.github.com"
 
           def fail(message):
               raise SystemExit(f"::error::{message}")
@@ -155,6 +155,9 @@ jobs:
           author = commit["commit"]["author"]
           if author.get("name") != SYNC_NAME or author.get("email") != SYNC_EMAIL:
               fail("Copybara review commit has an unexpected author")
+          committer = commit["commit"]["committer"]
+          if committer.get("name") != SYNC_NAME or committer.get("email") != SYNC_EMAIL:
+              fail("Copybara review commit has an unexpected committer")
 
           body = pull.get("body")
           message = commit["commit"].get("message")
