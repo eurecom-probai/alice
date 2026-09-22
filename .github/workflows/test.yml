@@ -219,11 +219,15 @@ jobs:
         if: steps.route.outputs.mode == 'normal'
         run: uv sync --locked --group dev
 
-      - name: Run tests
-        if: steps.route.outputs.mode == 'normal'
+      - name: Run internal tests
+        if: steps.route.outputs.mode == 'normal' && github.repository == 'eurecom-probai/alice-internal'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run pytest
+
+      - name: Run public tests without secrets
+        if: steps.route.outputs.mode == 'normal' && github.repository == 'eurecom-probai/alice'
+        run: uv run pytest -m "not integration"
 
       - name: Build package
         if: steps.route.outputs.mode == 'normal'
