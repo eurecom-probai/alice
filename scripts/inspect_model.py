@@ -10,21 +10,27 @@ import argparse
 import torch
 from transformers import AutoConfig
 
-from alice.torch.utils.hub import load_model
+from alice import load_model
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("model_id", help="Hugging Face model id or local checkpoint directory")
+    parser.add_argument(
+        "model_id", help="Hugging Face model id or local checkpoint directory"
+    )
     parser.add_argument("--revision", default=None)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
 
-    config = AutoConfig.from_pretrained(args.model_id, revision=args.revision, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(
+        args.model_id, revision=args.revision, trust_remote_code=True
+    )
     model = load_model(args.model_id, revision=args.revision, device=args.device)
     parameters = list(model.parameters())
     n_parameters = sum(parameter.numel() for parameter in parameters)
-    n_trainable = sum(parameter.numel() for parameter in parameters if parameter.requires_grad)
+    n_trainable = sum(
+        parameter.numel() for parameter in parameters if parameter.requires_grad
+    )
 
     print(f"model_id: {args.model_id}")
     print(f"model_class: {type(model).__name__}")
