@@ -9,10 +9,10 @@ import pytest
 import torch
 
 from alice import (
-    estimate_mi_minde,
-    estimate_mi_minde_fast,
+    estimate_mi,
+    estimate_mi_fast,
     load_model,
-    prepare_minde_model,
+    prepare_mi_model,
 )
 
 pytestmark = [
@@ -35,7 +35,7 @@ def model():
 @pytest.mark.parametrize("dim", [2, 5, 10])
 def test_projected_logits_match_checkpoint(model, dim):
     """Compare logits directly before the MI reduction can hide differences."""
-    prepared = prepare_minde_model(model, compile=False)
+    prepared = prepare_mi_model(model, compile=False)
     with torch.inference_mode():
         for seed in [1, 2]:
             generator = torch.Generator().manual_seed(seed)
@@ -56,7 +56,7 @@ def test_projected_logits_match_checkpoint(model, dim):
 @pytest.mark.parametrize("compiled", [False, True])
 def test_prepared_mi_matches_reference_with_tail_and_new_context(model, compiled):
     """Capture a full graph, preserve padded partitions and rebuild each context."""
-    prepared = prepare_minde_model(model, compile=compiled, backend="eager")
+    prepared = prepare_mi_model(model, compile=compiled, backend="eager")
     for seed in [3, 4]:
         samples = torch.randn(37, 4, generator=torch.Generator().manual_seed(seed))
         kwargs = {
@@ -66,7 +66,7 @@ def test_prepared_mi_matches_reference_with_tail_and_new_context(model, compiled
             "return_std": True,
             "pad_mask": torch.tensor([0.0, 0.0, 1.0, 0.0]),
         }
-        expected = estimate_mi_minde(
+        expected = estimate_mi(
             model,
             samples,
             slice(0, 4, 2),
@@ -74,7 +74,7 @@ def test_prepared_mi_matches_reference_with_tail_and_new_context(model, compiled
             generator=torch.Generator().manual_seed(42),
             **kwargs,
         )
-        actual = estimate_mi_minde_fast(
+        actual = estimate_mi_fast(
             prepared,
             samples,
             slice(0, 4, 2),
@@ -96,10 +96,10 @@ def test_prepared_mi_matches_reference_with_tail_and_new_context(model, compiled
 )
 def test_prepared_ablation_options(model, options):
     """Allow independent fallback to the checkpoint's original execution paths."""
-    prepared = prepare_minde_model(model, compile=False)
+    prepared = prepare_mi_model(model, compile=False)
     samples = torch.randn(35, 2, generator=torch.Generator().manual_seed(4))
     kwargs = {"n_context": 32, "n_t_samples": 2, "chunk": 5, "normalize": False}
-    expected = estimate_mi_minde(
+    expected = estimate_mi(
         model,
         samples,
         slice(0, 1),
@@ -107,7 +107,7 @@ def test_prepared_ablation_options(model, options):
         generator=torch.Generator().manual_seed(42),
         **kwargs,
     )
-    actual = estimate_mi_minde_fast(
+    actual = estimate_mi_fast(
         prepared,
         samples,
         slice(0, 1),
@@ -121,12 +121,10 @@ def test_prepared_ablation_options(model, options):
 
 def test_prepared_rejects_training_after_preparation(model):
     """Prevent stale wrapper mode from allowing a training-mode wrapped model."""
-    prepared = prepare_minde_model(model, compile=False)
+    prepared = prepare_mi_model(model, compile=False)
     model.train()
     try:
         with pytest.raises(ValueError, match="eval-only"):
-            estimate_mi_minde_fast(
-                prepared, torch.randn(5, 2), slice(0, 1), slice(1, 2)
-            )
+            estimate_mi_fast(prepared, torch.randn(5, 2), slice(0, 1), slice(1, 2))
     finally:
         model.eval()

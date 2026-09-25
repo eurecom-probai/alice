@@ -1,9 +1,9 @@
 # Required Notice: Copyright 2026 EURECOM (https://www.eurecom.fr/)
 #
 
-r"""MINDE eq.-21 mutual-information estimator in rectified-flow velocity form.
+r"""ALICE mutual-information estimator in rectified-flow velocity form.
 
-MINDE estimates ``I(X;Y)`` from the gap between the joint score and the
+ALICE estimates ``I(X;Y)`` from the gap between the joint score and the
 concatenation of conditional scores, with one block held clean in each
 conditional query.  For the rectified-flow interpolant
 ``z_t = (1 - t) z_0 + t epsilon``, the score--velocity relation is
@@ -138,14 +138,22 @@ def velocity_field_masked(
         flat_t = t.reshape(-1, 1)
         flat_mask = mask.expand(shape).reshape(-1, dim)
         if flat_t.shape[0] != flat.shape[0]:
-            raise ValueError(f"t must have one value per query row; got {tuple(t.shape)} for {tuple(shape)}")
+            raise ValueError(
+                f"t must have one value per query row; got {tuple(t.shape)} for {tuple(shape)}"
+            )
 
         outputs = []
         for start in range(0, flat.shape[0], chunk):
             stop = min(start + chunk, flat.shape[0])
             qz = flat[start:stop].unsqueeze(0).to(device=run_device, dtype=model_dtype)
-            qt = flat_t[start:stop].unsqueeze(0).to(device=run_device, dtype=model_dtype)
-            qm = flat_mask[start:stop].unsqueeze(0).to(device=run_device, dtype=model_dtype)
+            qt = (
+                flat_t[start:stop].unsqueeze(0).to(device=run_device, dtype=model_dtype)
+            )
+            qm = (
+                flat_mask[start:stop]
+                .unsqueeze(0)
+                .to(device=run_device, dtype=model_dtype)
+            )
             velocity = _predict_velocity(model, ctx, qz, qt, qm)
             outputs.append(velocity.squeeze(0).to(device=flat.device, dtype=flat.dtype))
         return torch.cat(outputs, dim=0).reshape(shape)
@@ -167,10 +175,14 @@ def _normal_quantile(probability: Tensor) -> Tensor:
         ``probability``.
     """
 
-    return math.sqrt(2.0) * torch.erfinv((2.0 * probability - 1.0).clamp(-1.0 + 1e-7, 1.0 - 1e-7))
+    return math.sqrt(2.0) * torch.erfinv(
+        (2.0 * probability - 1.0).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+    )
 
 
-def _gaussian_copula_normalize(reference: Tensor, values: Tensor | None = None) -> Tensor:
+def _gaussian_copula_normalize(
+    reference: Tensor, values: Tensor | None = None
+) -> Tensor:
     r"""_gaussian_copula_normalize(reference, values=None) -> Tensor
 
     Map values to standard-normal copula scores using the empirical CDF fitted
@@ -196,9 +208,13 @@ def _gaussian_copula_normalize(reference: Tensor, values: Tensor | None = None) 
     if values is None:
         values = reference
     if reference.ndim != 2:
-        raise ValueError(f"reference must have shape (N, d); got {tuple(reference.shape)}")
+        raise ValueError(
+            f"reference must have shape (N, d); got {tuple(reference.shape)}"
+        )
     if values.ndim != 2 or values.shape[-1] != reference.shape[-1]:
-        raise ValueError(f"values must have shape (M, {reference.shape[-1]}); got {tuple(values.shape)}")
+        raise ValueError(
+            f"values must have shape (M, {reference.shape[-1]}); got {tuple(values.shape)}"
+        )
     n, dim = reference.shape
     if n < 1:
         raise ValueError("reference must contain at least one row")
@@ -217,9 +233,12 @@ def _gaussian_copula_normalize(reference: Tensor, values: Tensor | None = None) 
         indices = torch.searchsorted(sorted_ref, x_column).clamp(1, n - 1)
         lower = sorted_ref[indices - 1]
         upper = sorted_ref[indices]
-        fraction = ((x_column - lower) / (upper - lower).clamp_min(1e-12)).clamp(0.0, 1.0)
+        fraction = ((x_column - lower) / (upper - lower).clamp_min(1e-12)).clamp(
+            0.0, 1.0
+        )
         result[:, column] = _normal_quantile(
-            positions[indices - 1] + fraction * (positions[indices] - positions[indices - 1])
+            positions[indices - 1]
+            + fraction * (positions[indices] - positions[indices - 1])
         )
     return result.to(values.dtype)
 
@@ -261,11 +280,15 @@ def _disjoint_split(
     elif n_context is None:
         n_context = n - n_eval
     if n_context < 1 or n_eval < 1:
-        raise ValueError(f"need n_context >= 1 and n_eval >= 1; got {n_context}, {n_eval}")
+        raise ValueError(
+            f"need n_context >= 1 and n_eval >= 1; got {n_context}, {n_eval}"
+        )
     if n_context + n_eval > n:
         raise ValueError(f"n_context + n_eval = {n_context + n_eval} exceeds n = {n}")
 
-    generator_device = torch.device(generator.device) if generator is not None else torch.device("cpu")
+    generator_device = (
+        torch.device(generator.device) if generator is not None else torch.device("cpu")
+    )
     permutation = torch.randperm(n, generator=generator, device=generator_device)
     return permutation[:n_context], permutation[n_context : n_context + n_eval]
 
@@ -296,15 +319,21 @@ def _random_tensor(
         ``dtype``.
     """
 
-    generator_device = torch.device(generator.device) if generator is not None else device
+    generator_device = (
+        torch.device(generator.device) if generator is not None else device
+    )
     if kind == "uniform":
-        values = torch.rand(shape, generator=generator, device=generator_device, dtype=dtype)
+        values = torch.rand(
+            shape, generator=generator, device=generator_device, dtype=dtype
+        )
     else:
-        values = torch.randn(shape, generator=generator, device=generator_device, dtype=dtype)
+        values = torch.randn(
+            shape, generator=generator, device=generator_device, dtype=dtype
+        )
     return values.to(device=device)
 
 
-def estimate_mi_minde(
+def estimate_mi(
     model: Any,
     joint_samples: Tensor,
     x_slice: slice,
@@ -322,9 +351,9 @@ def estimate_mi_minde(
     normalize: bool = True,
     pad_mask: Tensor | None = None,
 ) -> float | tuple[float, float]:
-    r"""estimate_mi_minde(model, joint_samples, x_slice, y_slice, *, ...) -> float | tuple[float, float]
+    r"""estimate_mi(model, joint_samples, x_slice, y_slice, *, ...) -> float | tuple[float, float]
 
-    Estimate ``I(X;Y)`` with the velocity form of MINDE equation 21.
+    Estimate ``I(X;Y)`` with ALICE rectified-flow velocity differences.
 
     ``joint_samples`` contains clean joint draws.  The two slices must be
     disjoint and cover every column.  The rows are split into a clean context
@@ -380,26 +409,37 @@ def estimate_mi_minde(
     """
 
     if joint_samples.ndim != 2:
-        raise ValueError(f"joint_samples must have shape (N, d); got {tuple(joint_samples.shape)}")
+        raise ValueError(
+            f"joint_samples must have shape (N, d); got {tuple(joint_samples.shape)}"
+        )
     if not torch.is_floating_point(joint_samples):
-        raise ValueError(f"joint_samples must use a floating dtype; got {joint_samples.dtype}")
+        raise ValueError(
+            f"joint_samples must use a floating dtype; got {joint_samples.dtype}"
+        )
     if n_t_samples < 1:
         raise ValueError(f"n_t_samples must be >= 1; got {n_t_samples}")
     if not 0.0 < t_min < t_max <= 1.0:
-        raise ValueError(f"require 0 < t_min < t_max <= 1; got t_min={t_min}, t_max={t_max}")
+        raise ValueError(
+            f"require 0 < t_min < t_max <= 1; got t_min={t_min}, t_max={t_max}"
+        )
     if chunk < 1:
         raise ValueError(f"chunk must be >= 1; got {chunk}")
 
     config = getattr(model, "config", None)
     if config is None or not getattr(config, "use_mask_channel", False):
         raise ValueError(
-            "estimate_mi_minde requires a model trained with a mask channel "
+            "estimate_mi requires a model trained with a mask channel "
             "(config.use_mask_channel=True)"
         )
 
     dim = joint_samples.shape[-1]
-    if not getattr(config, "variable_dim", False) and getattr(config, "d_y", None) != dim:
-        raise ValueError(f"model.config.d_y={getattr(config, 'd_y', None)} must match joint width d={dim}")
+    if (
+        not getattr(config, "variable_dim", False)
+        and getattr(config, "d_y", None) != dim
+    ):
+        raise ValueError(
+            f"model.config.d_y={getattr(config, 'd_y', None)} must match joint width d={dim}"
+        )
 
     covered = list(range(dim)[x_slice]) + list(range(dim)[y_slice])
     if sorted(covered) != list(range(dim)) or len(covered) != dim:
@@ -409,9 +449,13 @@ def estimate_mi_minde(
         )
 
     if pad_mask is not None and tuple(pad_mask.shape) != (dim,):
-        raise ValueError(f"pad_mask must have shape ({dim},); got {tuple(pad_mask.shape)}")
+        raise ValueError(
+            f"pad_mask must have shape ({dim},); got {tuple(pad_mask.shape)}"
+        )
 
-    context_indices, eval_indices = _disjoint_split(joint_samples.shape[0], n_context, n_eval, generator)
+    context_indices, eval_indices = _disjoint_split(
+        joint_samples.shape[0], n_context, n_eval, generator
+    )
     context_indices = context_indices.to(joint_samples.device)
     eval_indices = eval_indices.to(joint_samples.device)
     context = joint_samples[context_indices]
@@ -489,9 +533,13 @@ def estimate_mi_minde(
     estimate = float(sum_term / total_rows * interval)
     if not return_std:
         return estimate
-    variance = (sum_squared_term - sum_term.square() / total_rows) / max(total_rows - 1, 1)
-    standard_error = float(variance.clamp_min(0.0).sqrt() / math.sqrt(total_rows) * interval)
+    variance = (sum_squared_term - sum_term.square() / total_rows) / max(
+        total_rows - 1, 1
+    )
+    standard_error = float(
+        variance.clamp_min(0.0).sqrt() / math.sqrt(total_rows) * interval
+    )
     return estimate, standard_error
 
 
-__all__ = ["estimate_mi_minde"]
+__all__ = ["estimate_mi"]

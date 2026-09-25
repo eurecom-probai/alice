@@ -4,17 +4,17 @@
 """ALICE inference API."""
 
 from .torch import (
-    estimate_mi_minde,
-    estimate_mi_minde_fast,
+    estimate_mi,
+    estimate_mi_fast,
     load_model,
-    prepare_minde_model,
+    prepare_mi_model,
     velocity_field_masked,
 )
 
 __all__ = [
-    "estimate_mi_minde",
-    "estimate_mi_minde_fast",
+    "estimate_mi",
+    "estimate_mi_fast",
     "load_model",
-    "prepare_minde_model",
+    "prepare_mi_model",
     "velocity_field_masked",
 ]

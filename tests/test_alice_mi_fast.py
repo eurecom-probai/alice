@@ -9,7 +9,7 @@ import pytest
 import torch
 from torch import nn
 
-from alice import estimate_mi_minde, estimate_mi_minde_fast
+from alice import estimate_mi, estimate_mi_fast
 
 
 class MaskedModel(nn.Module):
@@ -64,14 +64,14 @@ def test_fast_matches_reference_and_rng(dtype, normalize, chunk):
         "pad_mask": torch.tensor([0.0, 0.0, 1.0, 0.0]),
     }
     rng = torch.Generator().manual_seed(42)
-    expected = estimate_mi_minde(
+    expected = estimate_mi(
         model, samples, slice(0, 4, 2), slice(1, 4, 2), generator=rng, **kwargs
     )
     state = rng.get_state()
     for options in ({}, {"fuse_queries": False}, {"use_cache": False}):
         rng.manual_seed(42)
         builds = model.builds
-        actual = estimate_mi_minde_fast(
+        actual = estimate_mi_fast(
             model,
             samples,
             slice(0, 4, 2),
@@ -90,7 +90,7 @@ def test_fallback_without_cache_api():
     """Models exposing only forward retain equivalent estimates."""
     from tests.test_mi import ZeroResidualModel
 
-    result = estimate_mi_minde_fast(
+    result = estimate_mi_fast(
         ZeroResidualModel().eval(),
         torch.randn(10, 2),
         slice(0, 1),
@@ -103,17 +103,15 @@ def test_fallback_without_cache_api():
 def test_training_mode_rejected():
     """Dropout-dependent training forwards cannot safely reuse support."""
     with pytest.raises(ValueError, match="eval-only"):
-        estimate_mi_minde_fast(
-            MaskedModel(), torch.randn(10, 2), slice(0, 1), slice(1, 2)
-        )
+        estimate_mi_fast(MaskedModel(), torch.randn(10, 2), slice(0, 1), slice(1, 2))
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("n", [1, 2, 17])
 def test_batched_normalization_matches_columnwise(n, dtype):
     """Preserve ties, out-of-range interpolation and noncontiguous inputs."""
-    from alice.torch.mi.minde import _gaussian_copula_normalize
-    from alice.torch.mi.minde_fast import _normalize_columns
+    from alice.torch.mi.alice_mi import _gaussian_copula_normalize
+    from alice.torch.mi.alice_mi_fast import _normalize_columns
 
     reference = torch.randn(8, n, dtype=dtype).T
     reference[:, 0] = 1.0
@@ -131,7 +129,7 @@ def test_batched_normalization_matches_columnwise(n, dtype):
 @pytest.mark.parametrize("coordinates", [1, 3])
 def test_projected_attention_preserves_projection_rounding(dtype, coordinates):
     """Match the native module, including low-precision bias rounding."""
-    from alice.torch.mi.minde_fast import _attention, _project_keys_values
+    from alice.torch.mi.alice_mi_fast import _attention, _project_keys_values
 
     attention = nn.MultiheadAttention(16, 4, batch_first=True, dtype=dtype).eval()
     query = torch.randn(1, coordinates, 7, 16, dtype=dtype)
@@ -144,6 +142,4 @@ def test_projected_attention_preserves_projection_rounding(dtype, coordinates):
             need_weights=False,
         )
         actual = _attention(attention, query, *_project_keys_values(attention, support))
-    torch.testing.assert_close(
-        actual.reshape_as(expected), expected, rtol=0, atol=1e-4
-    )
+    torch.testing.assert_close(actual.reshape_as(expected), expected, rtol=0, atol=1e-4)

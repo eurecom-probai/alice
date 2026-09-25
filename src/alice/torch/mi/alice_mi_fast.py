@@ -1,7 +1,7 @@
 # Required Notice: Copyright 2026 EURECOM (https://www.eurecom.fr/)
 #
 
-"""Cached, batched MINDE inference with the same Monte Carlo estimator."""
+"""Cached, batched ALICE MI inference with the same Monte Carlo estimator."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from ..utils import _model_device, _model_dtype
-from .minde import _disjoint_split, _normal_quantile, _random_tensor
+from .alice_mi import _disjoint_split, _normal_quantile, _random_tensor
 
 
 def _normalize_columns(reference: Tensor, values: Tensor) -> Tensor:
@@ -214,7 +214,7 @@ class _ProjectedModel(nn.Module):
         return self._query(qry_z_t, qry_t, qry_mask, *support_cache)
 
 
-def prepare_minde_model(
+def prepare_mi_model(
     model: nn.Module, *, compile: bool = True, backend: str = "inductor"
 ) -> nn.Module:
     """Prepare an eval-mode induced-group model for repeated MI estimation.
@@ -290,7 +290,7 @@ class _CachedModel:
 
 
 @torch.inference_mode()
-def estimate_mi_minde(
+def estimate_mi_fast(
     model: Any,
     joint_samples: Tensor,
     x_slice: slice,
@@ -311,9 +311,9 @@ def estimate_mi_minde(
     fuse_queries: bool = True,
     cache_projections: bool = True,
 ) -> float | tuple[float, float]:
-    r"""estimate_mi_minde(model, joint_samples, x_slice, y_slice, *, ...) -> float | tuple[float, float]
+    r"""estimate_mi_fast(model, joint_samples, x_slice, y_slice, *, ...) -> float | tuple[float, float]
 
-    Estimate ``I(X;Y)`` with cached, fused MINDE inference.
+    Estimate ``I(X;Y)`` with cached, fused ALICE MI inference.
 
     Support and decoder key/value projection caching default to enabled.
     Projection caching specializes the induced-group architecture;
@@ -411,7 +411,7 @@ def estimate_mi_minde(
     config = getattr(model, "config", None)
     if config is None or not getattr(config, "use_mask_channel", False):
         raise ValueError(
-            "estimate_mi_minde_fast requires a model trained with a mask channel "
+            "estimate_mi_fast requires a model trained with a mask channel "
             "(config.use_mask_channel=True)"
         )
 
@@ -556,4 +556,4 @@ def estimate_mi_minde(
     return estimate, standard_error
 
 
-__all__ = ["estimate_mi_minde", "prepare_minde_model"]
+__all__ = ["estimate_mi_fast", "prepare_mi_model"]

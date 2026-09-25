@@ -67,6 +67,12 @@ ALICE checkpoints load their model implementation through Hugging Face custom
 code with `trust_remote_code=True`; review the checkpoint source and revision
 before loading it.
 
+Estimate mutual information in nats with `alice.estimate_mi` or its cached,
+batched counterpart `alice.estimate_mi_fast`. Both accept the loaded model, a
+matrix of joint samples, and disjoint column slices identifying the two
+variables. The [tutorial notebook](notebooks/alice_mi_tutorial.ipynb) demonstrates
+the fast estimator and its Monte Carlo standard error.
+
 ## Citation
 
 The paper will be released shortly. For now, please cite this repository:

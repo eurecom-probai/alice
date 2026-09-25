@@ -7,8 +7,7 @@ import os
 import pytest
 import torch
 
-from alice import estimate_mi_minde, load_model
-
+from alice import estimate_mi, load_model
 
 MODEL_ID = "eurecom-probai/alice-small-stage2"
 
@@ -35,14 +34,16 @@ def _gaussian_joint(rho: float, n: int, seed: int = 0) -> torch.Tensor:
 
 
 def _true_gaussian_mi(rho: float) -> float:
-    return -0.5 * math.log1p(-rho**2)
+    return -0.5 * math.log1p(-(rho**2))
 
 
-@pytest.mark.parametrize("rho", (0.0, 0.5, 0.8), ids=("independent", "rho-0.5", "rho-0.8"))
+@pytest.mark.parametrize(
+    "rho", (0.0, 0.5, 0.8), ids=("independent", "rho-0.5", "rho-0.8")
+)
 def test_small_stage2_estimates_gaussians(small_stage2_model, rho):
     n_context = 2048
     n_eval = 128
-    estimate, standard_error = estimate_mi_minde(
+    estimate, standard_error = estimate_mi(
         small_stage2_model,
         _gaussian_joint(rho, n=n_context + n_eval, seed=100 + int(10 * rho)),
         slice(0, 1),
