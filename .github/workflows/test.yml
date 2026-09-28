@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
   pull_request:
 
 permissions:
@@ -54,7 +55,7 @@ jobs:
                       and pull["user"]["type"] == "Bot"
                       and expected_app
                       and re.fullmatch(r"copybara/public-pr-[1-9][0-9]*", branch) is not None
-                      and pull["base"]["ref"] == "main"
+                      and pull["base"]["ref"] == "dev"
                       and pull["head"]["repo"]["full_name"] == "eurecom-probai/alice-internal"
                   )
                   mode = "copybara" if valid else "reject"
@@ -136,7 +137,7 @@ jobs:
 
           if (
               pull["state"] != "open"
-              or pull["base"]["ref"] != "main"
+              or pull["base"]["ref"] != "dev"
               or pull["head"]["repo"]["full_name"] != INTERNAL_REPOSITORY
               or pull["head"]["sha"] != event_head
               or pull["user"]["login"] != expected_login
@@ -150,7 +151,7 @@ jobs:
               fail("GitHub returned the wrong internal commit")
           parents = commit.get("parents", [])
           if len(parents) != 1 or parents[0].get("sha") != pull["base"]["sha"]:
-              fail("Copybara review commit is not directly based on current internal main")
+              fail("Copybara review commit is not directly based on current internal dev")
 
           author = commit["commit"]["author"]
           if author.get("name") != SYNC_NAME or author.get("email") != SYNC_EMAIL:
@@ -221,6 +222,10 @@ jobs:
       - name: Install dependencies
         if: steps.route.outputs.mode == 'normal'
         run: uv sync --locked --group dev
+
+      - name: Validate internal synchronization tooling
+        if: steps.route.outputs.mode == 'normal' && github.repository == 'eurecom-probai/alice-internal'
+        run: python3 -m unittest discover -s .github/copybara -p '*_test.py'
 
       - name: Run internal tests
         if: steps.route.outputs.mode == 'normal' && github.repository == 'eurecom-probai/alice-internal'
