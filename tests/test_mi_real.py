@@ -7,7 +7,7 @@ import os
 import pytest
 import torch
 
-from alice import estimate_mi, load_model
+from alice import estimate_mi_fast, load_model
 
 MODEL_ID = "eurecom-probai/alice-small-stage2"
 
@@ -43,7 +43,7 @@ def _true_gaussian_mi(rho: float) -> float:
 def test_small_stage2_estimates_gaussians(small_stage2_model, rho):
     n_context = 2048
     n_eval = 128
-    estimate, standard_error = estimate_mi(
+    estimate, standard_error = estimate_mi_fast(
         small_stage2_model,
         _gaussian_joint(rho, n=n_context + n_eval, seed=100 + int(10 * rho)),
         slice(0, 1),

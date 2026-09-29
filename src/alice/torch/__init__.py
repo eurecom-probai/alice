@@ -4,7 +4,6 @@
 """PyTorch backend for ALICE."""
 
 from .mi import (
-    estimate_mi,
     estimate_mi_fast,
     prepare_mi_model,
     velocity_field_masked,
@@ -12,7 +11,6 @@ from .mi import (
 from .utils import load_model
 
 __all__ = [
-    "estimate_mi",
     "estimate_mi_fast",
     "load_model",
     "prepare_mi_model",

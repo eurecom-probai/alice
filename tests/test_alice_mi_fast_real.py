@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from alice import (
-    estimate_mi,
     estimate_mi_fast,
     load_model,
     prepare_mi_model,
@@ -66,11 +65,13 @@ def test_prepared_mi_matches_reference_with_tail_and_new_context(model, compiled
             "return_std": True,
             "pad_mask": torch.tensor([0.0, 0.0, 1.0, 0.0]),
         }
-        expected = estimate_mi(
+        expected = estimate_mi_fast(
             model,
             samples,
             slice(0, 4, 2),
             slice(1, 4, 2),
+            use_cache=False,
+            fuse_queries=False,
             generator=torch.Generator().manual_seed(42),
             **kwargs,
         )
@@ -99,11 +100,13 @@ def test_prepared_ablation_options(model, options):
     prepared = prepare_mi_model(model, compile=False)
     samples = torch.randn(35, 2, generator=torch.Generator().manual_seed(4))
     kwargs = {"n_context": 32, "n_t_samples": 2, "chunk": 5, "normalize": False}
-    expected = estimate_mi(
+    expected = estimate_mi_fast(
         model,
         samples,
         slice(0, 1),
         slice(1, 2),
+        use_cache=False,
+        fuse_queries=False,
         generator=torch.Generator().manual_seed(42),
         **kwargs,
     )

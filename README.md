@@ -52,13 +52,15 @@ Install the package and its dependencies with
 uv sync --locked
 ```
 
-Load a Hugging Face checkpoint or a local `save_pretrained` directory:
+Load the official Hugging Face model
+[`eurecom-probai/alice-1.0-base`](https://huggingface.co/eurecom-probai/alice-1.0-base)
+or a local `save_pretrained` directory:
 
 ```python
 from alice import load_model
 
 model = load_model(
-    "ORG/MODEL",
+    "eurecom-probai/alice-1.0-base",
     device="cuda",  # optional; defaults to "cpu"
 )
 ```
@@ -67,8 +69,8 @@ ALICE checkpoints load their model implementation through Hugging Face custom
 code with `trust_remote_code=True`; review the checkpoint source and revision
 before loading it.
 
-Estimate mutual information in nats with `alice.estimate_mi` or its cached,
-batched counterpart `alice.estimate_mi_fast`. Both accept the loaded model, a
+Estimate mutual information in nats with the cached, batched
+`alice.estimate_mi_fast`. It accepts the loaded model, a
 matrix of joint samples, and disjoint column slices identifying the two
 variables. The [tutorial notebook](notebooks/alice_mi_tutorial.ipynb) demonstrates
 the fast estimator and its Monte Carlo standard error.

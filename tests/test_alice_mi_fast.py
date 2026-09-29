@@ -9,7 +9,7 @@ import pytest
 import torch
 from torch import nn
 
-from alice import estimate_mi, estimate_mi_fast
+from alice import estimate_mi_fast
 
 
 class MaskedModel(nn.Module):
@@ -64,8 +64,15 @@ def test_fast_matches_reference_and_rng(dtype, normalize, chunk):
         "pad_mask": torch.tensor([0.0, 0.0, 1.0, 0.0]),
     }
     rng = torch.Generator().manual_seed(42)
-    expected = estimate_mi(
-        model, samples, slice(0, 4, 2), slice(1, 4, 2), generator=rng, **kwargs
+    expected = estimate_mi_fast(
+        model,
+        samples,
+        slice(0, 4, 2),
+        slice(1, 4, 2),
+        use_cache=False,
+        fuse_queries=False,
+        generator=rng,
+        **kwargs,
     )
     state = rng.get_state()
     for options in ({}, {"fuse_queries": False}, {"use_cache": False}):
@@ -110,14 +117,26 @@ def test_training_mode_rejected():
 @pytest.mark.parametrize("n", [1, 2, 17])
 def test_batched_normalization_matches_columnwise(n, dtype):
     """Preserve ties, out-of-range interpolation and noncontiguous inputs."""
-    from alice.torch.mi.alice_mi import _gaussian_copula_normalize
     from alice.torch.mi.alice_mi_fast import _normalize_columns
 
     reference = torch.randn(8, n, dtype=dtype).T
     reference[:, 0] = 1.0
     values = torch.randn(8, 23, dtype=dtype).T * 10
     values[:n] = reference
-    expected = _gaussian_copula_normalize(reference, values)
+    if n == 1:
+        expected = torch.zeros_like(values)
+    else:
+        columns = []
+        for ref, val in zip(reference.T, values.T):
+            ordered = ref.sort().values
+            index = torch.searchsorted(ordered, val.contiguous()).clamp(1, n - 1)
+            fraction = (
+                (val - ordered[index - 1])
+                / (ordered[index] - ordered[index - 1]).clamp_min(1e-12)
+            ).clamp(0, 1)
+            probability = (index + fraction) / (n + 1)
+            columns.append(torch.distributions.Normal(0, 1).icdf(probability))
+        expected = torch.stack(columns, dim=1)
     torch.testing.assert_close(
         _normalize_columns(reference, values), expected, rtol=0, atol=1e-4
     )

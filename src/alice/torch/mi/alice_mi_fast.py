@@ -1,7 +1,7 @@
 # Required Notice: Copyright 2026 EURECOM (https://www.eurecom.fr/)
 #
 
-"""Cached, batched ALICE MI inference with the same Monte Carlo estimator."""
+"""Cached, batched ALICE mutual-information estimation in velocity form."""
 
 from __future__ import annotations
 
@@ -13,7 +13,115 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from ..utils import _model_device, _model_dtype
-from .alice_mi import _disjoint_split, _normal_quantile, _random_tensor
+
+
+def _normal_quantile(probability: Tensor) -> Tensor:
+    r"""_normal_quantile(probability) -> Tensor
+
+    Apply the standard-normal inverse CDF using ``erfinv``.
+
+    Args:
+        probability (Tensor): Probabilities in ``[0, 1]``. Values are
+            clamped slightly away from the endpoints for numerical stability.
+
+    Returns:
+        Tensor: Standard-normal quantiles with the same shape and dtype as
+        ``probability``.
+    """
+
+    return math.sqrt(2.0) * torch.erfinv(
+        (2.0 * probability - 1.0).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+    )
+
+
+def _disjoint_split(
+    n: int,
+    n_context: int | None,
+    n_eval: int | None,
+    generator: torch.Generator | None,
+):
+    r"""_disjoint_split(n, n_context, n_eval, generator) -> tuple[Tensor, Tensor]
+
+    Resolve and apply a random disjoint context/evaluation split.
+
+    If either size is ``None``, infer it from the other size and ``n``. If
+    both are ``None``, use the first half for context and the remainder for
+    evaluation. The returned indices are generated on the generator's device;
+    the estimator moves them to the sample device before indexing.
+
+    Args:
+        n (int): Total number of available rows.
+        n_context (int | None): Number of context rows, or ``None`` to infer.
+        n_eval (int | None): Number of evaluation rows, or ``None`` to infer.
+        generator (torch.Generator | None): Generator controlling the random
+            permutation. Default: ``None``.
+
+    Returns:
+        tuple[Tensor, Tensor]: Context and evaluation index tensors.
+
+    Raises:
+        ValueError: If either split is empty or their sum exceeds ``n``.
+    """
+
+    if n_context is None and n_eval is None:
+        n_context = n // 2
+        n_eval = n - n_context
+    elif n_eval is None:
+        n_eval = n - n_context
+    elif n_context is None:
+        n_context = n - n_eval
+    if n_context < 1 or n_eval < 1:
+        raise ValueError(
+            f"need n_context >= 1 and n_eval >= 1; got {n_context}, {n_eval}"
+        )
+    if n_context + n_eval > n:
+        raise ValueError(f"n_context + n_eval = {n_context + n_eval} exceeds n = {n}")
+
+    generator_device = (
+        torch.device(generator.device) if generator is not None else torch.device("cpu")
+    )
+    permutation = torch.randperm(n, generator=generator, device=generator_device)
+    return permutation[:n_context], permutation[n_context : n_context + n_eval]
+
+
+def _random_tensor(
+    kind: str,
+    shape: tuple[int, ...],
+    *,
+    generator: torch.Generator | None,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    r"""_random_tensor(kind, shape, *, generator, device, dtype) -> Tensor
+
+    Draw a reproducible random tensor, using the generator's device when a
+    generator is supplied and moving the result to ``device`` afterward.
+
+    Args:
+        kind (str): ``"uniform"`` for ``torch.rand``; any other value selects
+            ``torch.randn``.
+        shape (tuple[int, ...]): Shape of the tensor to draw.
+        generator (torch.Generator | None): Optional random generator.
+        device (torch.device): Destination device.
+        dtype (torch.dtype): Output dtype.
+
+    Returns:
+        Tensor: Random values on ``device`` with the requested ``shape`` and
+        ``dtype``.
+    """
+
+    generator_device = (
+        torch.device(generator.device) if generator is not None else device
+    )
+    if kind == "uniform":
+        values = torch.rand(
+            shape, generator=generator, device=generator_device, dtype=dtype
+        )
+    else:
+        values = torch.randn(
+            shape, generator=generator, device=generator_device, dtype=dtype
+        )
+    return values.to(device=device)
 
 
 def _normalize_columns(reference: Tensor, values: Tensor) -> Tensor:

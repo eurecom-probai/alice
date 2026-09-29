@@ -4,7 +4,6 @@
 """ALICE inference API."""
 
 from .torch import (
-    estimate_mi,
     estimate_mi_fast,
     load_model,
     prepare_mi_model,
@@ -12,7 +11,6 @@ from .torch import (
 )
 
 __all__ = [
-    "estimate_mi",
     "estimate_mi_fast",
     "load_model",
     "prepare_mi_model",

@@ -9,8 +9,8 @@ import alice.jax
 import alice.torch
 import alice.torch.mi
 from alice.torch import utils
-from alice.torch.mi.alice_mi import estimate_mi, velocity_field_masked
 from alice.torch.mi.alice_mi_fast import estimate_mi_fast, prepare_mi_model
+from alice.torch.mi.velocity import velocity_field_masked
 
 
 def test_root_api_defaults_to_torch_backend():
@@ -21,7 +21,6 @@ def test_root_api_defaults_to_torch_backend():
 @pytest.mark.parametrize(
     "name, implementation",
     [
-        ("estimate_mi", estimate_mi),
         ("estimate_mi_fast", estimate_mi_fast),
         ("prepare_mi_model", prepare_mi_model),
         ("velocity_field_masked", velocity_field_masked),
@@ -62,3 +61,9 @@ def test_load_model_uses_autoclass_and_configures_runtime(monkeypatch):
         "device": "cuda",
         "eval": True,
     }
+
+
+def test_slow_estimator_is_not_exported():
+    for namespace in (alice, alice.torch, alice.torch.mi):
+        assert not hasattr(namespace, "estimate_mi")
+        assert "estimate_mi" not in namespace.__all__
