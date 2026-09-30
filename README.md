@@ -35,7 +35,7 @@ ALICE does not require ground-truth mutual information values for inference: it 
 
 ALICE does not require any fine-tuning or training on the target distribution, making it a powerful tool for researchers and practitioners in the field of information theory, machine learning, and data science.
 
-
+📄 **Paper:** [ALICE: In-context, Zero-shot, Mutual Information Estimation](https://arxiv.org/abs/2609.34962)
 
 ## 📅 Updates
 
