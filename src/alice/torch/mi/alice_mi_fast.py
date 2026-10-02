@@ -11,6 +11,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 from ..utils import _model_device, _model_dtype
 
@@ -128,7 +129,7 @@ def _normalize_columns(reference: Tensor, values: Tensor) -> Tensor:
     """Apply empirical Gaussian copulas to all columns with batched searches."""
     n = reference.shape[0]
     if n == 1:
-        return torch.zeros_like(values)
+        return values * 0.0
     dtype = torch.float64 if reference.dtype == torch.float64 else torch.float32
     sorted_ref = reference.to(dtype).T.contiguous().sort(dim=-1).values
     x = values.to(dtype).T.contiguous()
@@ -141,6 +142,46 @@ def _normalize_columns(reference: Tensor, values: Tensor) -> Tensor:
         positions[indices] - positions[indices - 1]
     )
     return _normal_quantile(probability).T.to(values.dtype).contiguous()
+
+
+def _soft_normalize_columns(reference: Tensor, values: Tensor) -> Tensor:
+    r"""Apply a context-fitted Gaussian-kernel CDF and normal quantile.
+
+    For each column, use bandwidth ``sqrt(0.2**2 * variance + 0.001**2)``
+    with population variance fitted only on ``reference``. Average
+    ``Phi((value - reference) / bandwidth)`` over context rows and shrink
+    probabilities to ``[1e-4, 1 - 1e-4]`` before the inverse normal CDF.
+    Gradients include query values, context values and the fitted bandwidth.
+
+    Inputs have shapes ``(n_context, d)`` and ``(n_values, d)``. Computation
+    preserves FP64 and otherwise uses FP32; output retains that working dtype
+    and the input device. Singleton contexts use the same smooth formula.
+    Deterministic chunks of 128 query rows are checkpointed when inputs require
+    gradients, avoiding retention of all pairwise kernel activations.
+    """
+    dtype = torch.float64 if reference.dtype == torch.float64 else torch.float32
+    reference, values = reference.to(dtype), values.to(dtype)
+    bandwidth = (0.2**2 * reference.var(dim=0, correction=0) + 0.001**2).sqrt()
+
+    def transform(query: Tensor, context: Tensor, width: Tensor) -> Tensor:
+        """Gaussianize one query chunk with explicit fitted-CDF dependencies."""
+        distance = (query[:, None, :] - context[None, :, :]) / width
+        cdf = (0.5 * (1 + torch.erf(distance / math.sqrt(2)))).mean(dim=1)
+        probability = 1e-4 + (1 - 2e-4) * cdf
+        return math.sqrt(2) * torch.erfinv(2 * probability - 1)
+
+    use_checkpoint = torch.is_grad_enabled() and (
+        reference.requires_grad or values.requires_grad
+    )
+    return torch.cat(
+        [
+            checkpoint(transform, query, reference, bandwidth, use_reentrant=False)
+            if use_checkpoint
+            else transform(query, reference, bandwidth)
+            for query in values.split(128, dim=0)
+        ],
+        dim=0,
+    )
 
 
 def _project_keys_values(
@@ -211,8 +252,8 @@ def _supports_projected_cache(model: Any) -> bool:
     return True
 
 
-class _ProjectedModel(nn.Module):
-    """Eval-only induced-group adapter with per-context decoder projection caching."""
+class _InputGradModel(nn.Module):
+    """Use induced-group components without inference-only cache decorators."""
 
     def __init__(self, model: nn.Module):
         """Wrap the model without changing its parameters, methods or mode."""
@@ -220,15 +261,49 @@ class _ProjectedModel(nn.Module):
         self.model = model
         self.config = model.config
         self.training = model.training
-        self.terms = self._terms
 
     def forward(self, **kwargs):
         """Retain the original forward when support caching is disabled."""
         return self.model(**kwargs)
 
     def _support_cache(self, context: Tensor):
+        """Build a fresh graph, support representation and latents with autograd."""
+        graph, support = self.model._encode_support(context, ctx_mask=None)
+        latents = self.model._encode_latents(support, graph, support_padding_mask=None)
+        return graph, support, latents
+
+    def predict_query_logits_cached(
+        self,
+        ctx_clean: Tensor,
+        qry_z_t: Tensor,
+        qry_t: Tensor,
+        qry_mask: Tensor,
+        support_cache: Any,
+    ) -> Tensor:
+        """Decode queries using explicit graph-bearing support tensors."""
+        graph, support, latents = support_cache
+        query = self.model._encode_query(qry_z_t, qry_t, qry_mask, graph)
+        query = self.model._decode_query(
+            query, latents, support, graph, support_padding_mask=None
+        )
+        return self.model.head(self.model.final_norm(query)).squeeze(-1).transpose(1, 2)
+
+
+class _ProjectedModel(_InputGradModel):
+    """Eval-only induced-group adapter with per-context decoder projection caching."""
+
+    def __init__(self, model: nn.Module):
+        """Wrap the model and expose the compilable query integrand."""
+        super().__init__(model)
+        self.terms = self._terms
+
+    def _support_cache(self, context: Tensor, *, differentiable: bool = False):
         """Encode support and cache normalized decoder key/value projections."""
-        graph, support, latents = self.model._support_cache(context)
+        graph, support, latents = (
+            super()._support_cache(context)
+            if differentiable
+            else self.model._support_cache(context)
+        )
         decoder = self.model.query_decoder
         latent_k, latent_v = _project_keys_values(
             decoder.latent_attention, decoder.latent_key_value_norm(latents)
@@ -356,48 +431,128 @@ class _CachedModel:
     """Bind one support cache to an eval-mode model without mutating it."""
 
     def __init__(
-        self, model: Any, context: Tensor, use_cache: bool, cache_projections: bool
+        self,
+        model: Any,
+        context: Tensor,
+        use_cache: bool,
+        cache_projections: bool,
+        differentiable: bool = False,
     ):
         """Build a fresh cache for this estimation call when supported."""
         if isinstance(model, _ProjectedModel) and not cache_projections:
             model = model.model
         if use_cache and cache_projections and _supports_projected_cache(model):
             model = _ProjectedModel(model)
+        if differentiable and use_cache:
+            if _supports_projected_cache(model):
+                model = _InputGradModel(model)
+            elif not isinstance(model, _ProjectedModel):
+                # Unknown checkpoint caches may hide no_grad or detach calls.
+                # Only an explicit capability declaration opts them in.
+                use_cache = getattr(model, "supports_input_grad_cache", False) is True
         self.model = model
         self.context = context
+        self.differentiable = differentiable
         self.cache = None
         if (
             use_cache
             and callable(getattr(model, "_support_cache", None))
             and callable(getattr(model, "predict_query_logits_cached", None))
         ):
-            self.cache = model._support_cache(context)
+            if isinstance(model, _ProjectedModel):
+                self.cache = model._support_cache(
+                    context, differentiable=differentiable
+                )
+            else:
+                self.cache = model._support_cache(context)
 
-    def velocity(self, states: Tensor, times: Tensor, masks: Tensor) -> Tensor:
+    def velocity(
+        self,
+        states: Tensor,
+        times: Tensor,
+        masks: Tensor,
+        context: Tensor,
+        cache: Any,
+    ) -> Tensor:
         """Evaluate all masked states and their zero-time corrections together."""
-        dtype = self.context.dtype
+        dtype = context.dtype
         states = states.to(dtype).unsqueeze(0)
         times = times.to(dtype).unsqueeze(0)
         masks = masks.to(dtype).unsqueeze(0)
         inputs = {
-            "ctx_clean": self.context,
+            "ctx_clean": context,
             "qry_z_t": torch.cat((states, states), dim=1),
             "qry_t": torch.cat((times, torch.zeros_like(times)), dim=1),
             "qry_mask": torch.cat((masks, masks), dim=1),
         }
-        if self.cache is not None:
+        if cache is not None:
             logits = self.model.predict_query_logits_cached(
-                **inputs, support_cache=self.cache
+                **inputs, support_cache=cache
             )
         else:
             logits = getattr(self.model(**inputs), "logits", None)
             if logits is None:
                 raise RuntimeError("ALICE model did not return logits")
+        if (
+            self.differentiable
+            and (states.requires_grad or context.requires_grad)
+            and not logits.requires_grad
+        ):
+            raise RuntimeError(
+                "model query logits do not support input autograd; use a checkpoint "
+                "with a gradient-capable forward/cache implementation"
+            )
         at_t, at_zero = logits.chunk(2, dim=1)
         return (states + at_t - at_zero).squeeze(0)
 
+    def terms(
+        self,
+        clean: Tensor,
+        full: Tensor,
+        times: Tensor,
+        masks: Tensor,
+        keep: Tensor,
+        x_slice: slice,
+        y_slice: slice,
+        context: Tensor,
+        cache: Any,
+        fuse_queries: bool,
+    ) -> Tensor:
+        """Evaluate a deterministic chunk with explicit context/cache dependencies."""
+        if (
+            isinstance(self.model, _ProjectedModel)
+            and cache is not None
+            and fuse_queries
+        ):
+            return self.model.terms(
+                clean, full, times, masks, keep, x_slice, y_slice, *cache
+            )
+        x_noised = clean.clone()
+        x_noised[:, x_slice] = full[:, x_slice]
+        y_noised = clean.clone()
+        y_noised[:, y_slice] = full[:, y_slice]
+        states = (full, x_noised, y_noised)
+        field_masks = tuple(mask.expand_as(full) for mask in masks)
+        if fuse_queries:
+            velocities = self.velocity(
+                torch.cat(states),
+                times.repeat(3, 1),
+                torch.cat(field_masks),
+                context,
+                cache,
+            ).to(full.dtype)
+            v_full, v_x_cond, v_y_cond = velocities.chunk(3)
+        else:
+            v_full, v_x_cond, v_y_cond = (
+                self.velocity(state, times, mask, context, cache).to(full.dtype)
+                for state, mask in zip(states, field_masks)
+            )
+        diff_x = (v_full - v_x_cond)[:, x_slice] * keep[x_slice]
+        diff_y = (v_full - v_y_cond)[:, y_slice] * keep[y_slice]
+        gap = diff_x.square().sum(dim=-1) + diff_y.square().sum(dim=-1)
+        return (1.0 - times[:, 0]) / times[:, 0] * gap
 
-@torch.inference_mode()
+
 def estimate_mi_fast(
     model: Any,
     joint_samples: Tensor,
@@ -418,14 +573,16 @@ def estimate_mi_fast(
     use_cache: bool = True,
     fuse_queries: bool = True,
     cache_projections: bool = True,
-) -> float | tuple[float, float]:
-    r"""estimate_mi_fast(model, joint_samples, x_slice, y_slice, *, ...) -> float | tuple[float, float]
+    differentiable: bool = False,
+    checkpoint_queries: bool = False,
+) -> float | tuple[float, float] | Tensor | tuple[Tensor, Tensor]:
+    r"""estimate_mi_fast(model, joint_samples, x_slice, y_slice, *, ...)
 
     Estimate ``I(X;Y)`` with cached, fused ALICE MI inference.
 
     Support and decoder key/value projection caching default to enabled.
     Projection caching specializes the induced-group architecture;
-    ``cache_projections=False`` uses the checkpoint's unmodified cached decoder.
+    ``cache_projections=False`` skips decoder projection caching.
     Support caching applies to checkpoints exposing the support-cache API;
     other models use ordinary forwards. The cache lives only for this call.
     ``fuse_queries=True`` batches the three masks into one forward, including
@@ -445,6 +602,32 @@ def estimate_mi_fast(
     draw.  The integral uses the derived weight ``(1 - t) / t`` and is
     multiplied by ``t_max - t_min`` because times are sampled uniformly on
     that interval.
+
+    With ``differentiable=True``, return tensors and preserve input gradients
+    through context and queries. All model parameters must already be frozen;
+    their flags and gradients are never modified. Enclosing ``no_grad()`` or
+    ``inference_mode()`` and inference-created samples are rejected. A new
+    autograd graph and cache are built for each call. Do not change inputs or
+    model state between this call and backward, including checkpoint recomputation.
+
+    Recognized induced-group checkpoints use their ordinary encoding/decoding
+    components to bypass inference-only cache methods; no checkpoint update is
+    needed. Other checkpoints use forward unless they explicitly declare
+    ``supports_input_grad_cache=True``, guaranteeing both cache methods preserve
+    context and query autograd. Their forward must itself support input autograd.
+
+    With ``normalize=True``, differentiable calls use a smooth Gaussian-kernel
+    CDF fitted only on context, including gradients through its values and
+    bandwidth. The bandwidth is ``sqrt(0.2**2 * variance + 0.001**2)`` and CDF
+    probabilities shrink to ``[1e-4, 1 - 1e-4]``. Ordinary inference uses hard
+    empirical ranks, so normalized MI values can differ between modes. No
+    transform is detached or given a straight-through derivative. Use
+    ``normalize=False`` for caller-provided preprocessing in either mode.
+
+    Differentiable reductions use FP32 for FP16/BF16 samples, otherwise the
+    sample dtype. Model operations retain the model dtype; low-precision
+    gradients may need caller-managed loss scaling. Random draws precede any
+    activation checkpoint and follow the same order as inference calls.
 
     Args:
         model (torch.nn.Module): Eval-mode ALICE model trained with
@@ -484,16 +667,98 @@ def estimate_mi_fast(
         cache_projections (bool, optional): Cache decoder attention keys and
             values for compatible induced-group checkpoints. Requires
             ``use_cache=True``. Default: ``True``.
+        differentiable (bool, optional): Return tensors with input autograd,
+            requiring an eval-mode model with frozen parameters. Default: ``False``.
+        checkpoint_queries (bool, optional): Recompute each query chunk's
+            activations during backward using non-reentrant checkpointing.
+            Requires ``differentiable=True``. Context/cache tensors and their
+            encoding graph remain resident; support encoding is not checkpointed
+            when cached. Default: ``False``.
 
     Returns:
-        float | tuple[float, float]: MI estimate in nats. When
-        ``return_std=True``, return ``(estimate, standard_error)``.
+        float | tuple[float, float] | Tensor | tuple[Tensor, Tensor]: MI in nats.
+        Differentiable mode returns scalar tensors on the model evaluation device.
+        With ``return_std=True``, return ``(estimate, standard_error)``; this is
+        Monte Carlo standard error, not estimator accuracy. Its derivative is
+        defined as zero at nonpositive estimated variance.
 
     Raises:
         ValueError: If the samples, model mask-channel capability, partition,
             integration interval, chunk size, split sizes, or padding mask
-            have invalid shapes or values.
+            have invalid shapes or values, or autograd requirements are violated.
+        RuntimeError: If the model omits logits or returns detached logits for
+            inputs requiring gradients.
     """
+
+    if checkpoint_queries and not differentiable:
+        raise ValueError("checkpoint_queries=True requires differentiable=True")
+    if differentiable:
+        if torch.is_inference_mode_enabled() or not torch.is_grad_enabled():
+            raise ValueError(
+                "differentiable=True requires enabled autograd outside no_grad() "
+                "and inference_mode()"
+            )
+        if torch.is_inference(joint_samples):
+            raise ValueError("joint_samples must be created outside inference_mode()")
+        if any(parameter.requires_grad for parameter in model.parameters()):
+            raise ValueError(
+                "differentiable=True requires frozen model parameters; "
+                "call model.requires_grad_(False) first"
+            )
+    with torch.enable_grad() if differentiable else torch.inference_mode():
+        result = _estimate_mi_tensor(
+            model,
+            joint_samples,
+            x_slice,
+            y_slice,
+            n_context=n_context,
+            n_eval=n_eval,
+            n_t_samples=n_t_samples,
+            t_min=t_min,
+            t_max=t_max,
+            chunk=chunk,
+            generator=generator,
+            device=device,
+            return_std=return_std,
+            normalize=normalize,
+            pad_mask=pad_mask,
+            use_cache=use_cache,
+            fuse_queries=fuse_queries,
+            cache_projections=cache_projections,
+            differentiable=differentiable,
+            checkpoint_queries=checkpoint_queries,
+        )
+        if differentiable:
+            return result
+        if isinstance(result, tuple):
+            return tuple(float(value) for value in result)
+        return float(result)
+
+
+def _estimate_mi_tensor(
+    model: Any,
+    joint_samples: Tensor,
+    x_slice: slice,
+    y_slice: slice,
+    *,
+    n_context: int | None = None,
+    n_eval: int | None = None,
+    n_t_samples: int = 64,
+    t_min: float = 1e-3,
+    t_max: float = 1.0 - 1e-3,
+    chunk: int = 256,
+    generator: torch.Generator | None = None,
+    device: torch.device | str | None = None,
+    return_std: bool = False,
+    normalize: bool = True,
+    pad_mask: Tensor | None = None,
+    use_cache: bool = True,
+    fuse_queries: bool = True,
+    cache_projections: bool = True,
+    differentiable: bool = False,
+    checkpoint_queries: bool = False,
+) -> Tensor | tuple[Tensor, Tensor]:
+    """Compute MI tensors in the caller-selected gradient mode."""
 
     if getattr(model, "training", False) or (
         isinstance(model, _ProjectedModel) and model.model.training
@@ -552,7 +817,8 @@ def estimate_mi_fast(
     context = joint_samples[context_indices]
     eval_z0 = joint_samples[eval_indices]
     if normalize:
-        normalized = _normalize_columns(context, torch.cat((context, eval_z0)))
+        normalizer = _soft_normalize_columns if differentiable else _normalize_columns
+        normalized = normalizer(context, torch.cat((context, eval_z0)))
         context, eval_z0 = normalized.split((context.shape[0], eval_z0.shape[0]))
 
     run_device = _model_device(model, device)
@@ -563,6 +829,7 @@ def estimate_mi_fast(
         ),
         use_cache,
         cache_projections,
+        differentiable,
     )
     dtype = eval_z0.dtype
     eval_device = eval_z0.device
@@ -591,15 +858,18 @@ def estimate_mi_fast(
     mask_y[y_slice] = 1.0
     mask_all = torch.ones(dim, device=run_device, dtype=dtype)
     keep = torch.ones(dim, device=run_device, dtype=dtype)
-    keep_x = keep_y = None
     if pad_mask is not None:
         keep = 1.0 - pad_mask.to(device=run_device, dtype=dtype)
-        keep_x, keep_y = keep[x_slice], keep[y_slice]
 
     masks = torch.stack((mask_all, mask_x, mask_y))
     total_rows = eval_z0.shape[0] * n_t_samples
-    sum_term = torch.zeros((), device=run_device, dtype=dtype)
-    sum_squared_term = torch.zeros((), device=run_device, dtype=dtype)
+    accumulation_dtype = (
+        torch.float32
+        if differentiable and dtype in (torch.float16, torch.bfloat16)
+        else dtype
+    )
+    sum_term = torch.zeros((), device=run_device, dtype=accumulation_dtype)
+    sum_squared_term = torch.zeros_like(sum_term)
     flat_zfull = z_full.reshape(-1, dim)
     flat_t = t.reshape(-1, 1)
 
@@ -610,57 +880,42 @@ def estimate_mi_fast(
         full = flat_zfull[start:stop]
         times = flat_t[start:stop]
 
-        if (
-            isinstance(predictor.model, _ProjectedModel)
-            and predictor.cache is not None
-            and fuse_queries
-        ):
-            term = predictor.model.terms(
-                clean, full, times, masks, keep, x_slice, y_slice, *predictor.cache
-            )
-            sum_term = sum_term + term.sum()
-            if return_std:
-                sum_squared_term = sum_squared_term + term.square().sum()
-            continue
-
-        x_noised = clean.clone()
-        x_noised[:, x_slice] = full[:, x_slice]
-        y_noised = clean.clone()
-        y_noised[:, y_slice] = full[:, y_slice]
-
-        states = (full, x_noised, y_noised)
-        field_masks = tuple(mask.expand_as(full) for mask in (mask_all, mask_x, mask_y))
-        if fuse_queries:
-            velocities = predictor.velocity(
-                torch.cat(states), times.repeat(3, 1), torch.cat(field_masks)
-            ).to(dtype)
-            v_full, v_x_cond, v_y_cond = velocities.chunk(3)
-        else:
-            v_full, v_x_cond, v_y_cond = (
-                predictor.velocity(state, times, mask).to(dtype)
-                for state, mask in zip(states, field_masks)
-            )
-        diff_x = (v_full - v_x_cond)[:, x_slice]
-        diff_y = (v_full - v_y_cond)[:, y_slice]
-        if keep_x is not None:
-            diff_x = diff_x * keep_x
-            diff_y = diff_y * keep_y
-        gap = diff_x.square().sum(dim=-1) + diff_y.square().sum(dim=-1)
-        term = ((1.0 - times.squeeze(-1)) / times.squeeze(-1)) * gap
+        arguments = (
+            clean.to(accumulation_dtype),
+            full.to(accumulation_dtype),
+            times.to(accumulation_dtype),
+            masks,
+            keep,
+            x_slice,
+            y_slice,
+            predictor.context,
+            predictor.cache,
+            fuse_queries,
+        )
+        term = (
+            checkpoint(predictor.terms, *arguments, use_reentrant=False)
+            if checkpoint_queries
+            else predictor.terms(*arguments)
+        )
         sum_term = sum_term + term.sum()
         if return_std:
             sum_squared_term = sum_squared_term + term.square().sum()
 
     interval = t_max - t_min
-    estimate = float(sum_term / total_rows * interval)
+    estimate = sum_term / total_rows * interval
     if not return_std:
         return estimate
     variance = (sum_squared_term - sum_term.square() / total_rows) / max(
         total_rows - 1, 1
     )
-    standard_error = float(
-        variance.clamp_min(0.0).sqrt() / math.sqrt(total_rows) * interval
-    )
+    if differentiable:
+        # Define a finite zero derivative for degenerate/clamped MC variance.
+        positive = variance > 0
+        root = torch.where(positive, variance, torch.ones_like(variance)).sqrt()
+        root = torch.where(positive, root, torch.zeros_like(root))
+    else:
+        root = variance.clamp_min(0.0).sqrt()
+    standard_error = root / math.sqrt(total_rows) * interval
     return estimate, standard_error
 
 

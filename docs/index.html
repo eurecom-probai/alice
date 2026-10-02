@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="ALICE is a foundation model for in-context, zero-shot mutual information estimation: one Transformer estimates rectified-flow velocity fields from samples of an unseen distribution and turns them into an MI estimate.">
+    <title>ALICE: In-context, Zero-shot, Mutual Information Estimation</title>
+    <link rel="stylesheet" href="assets/css/style.css">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['\\(', '\\)']],
+          displayMath: [['\\[', '\\]']],
+          tags: 'ams',
+          macros: {
+            MI: '\\operatorname{I}',
+            KL: ['\\operatorname{KL}\\!\\left[#1\\,\\middle\\|\\,#2\\right]', 2],
+            Ex: '\\mathbb{E}',
+            cU: '\\mathcal{U}',
+            Norm: ['\\left\\lVert #1 \\right\\rVert', 1],
+            vel: 'v',
+            ctx: 'C',
+            vmodel: 'v_{\\theta}',
+            indone: '\\mathbf{1}',
+            indzero: '\\mathbf{0}',
+            d: ['\\operatorname{d}\\!{#1}', 1]
+          }
+        },
+        output: { displayOverflow: 'scroll' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-chtml.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="hero container">
+      <p class="venue">arXiv:2609.34962 · 2026</p>
+      <h1>ALICE<br><span>In-context, Zero-shot, Mutual Information Estimation</span></h1>
+      <p class="authors">Giulio Franzese<sup>*</sup>, Simone Rossi<sup>*</sup>, Pietro Michiardi<sup>*</sup></p>
+      <p class="affiliations">EURECOM, Sophia Antipolis, France</p>
+      <p class="author-note"><sup>*</sup> Equal contribution</p>
+      <div class="resources" role="group" aria-label="Project resources">
+        <a href="https://arxiv.org/abs/2609.34962">Paper</a>
+        <a href="https://github.com/eurecom-probai/alice">Code</a>
+        <a href="https://huggingface.co/collections/eurecom-probai/alice-foundation-models-for-information-estimation-6aba9295ab144cac37be43a9">Models</a>
+        <a href="https://huggingface.co/spaces/eurecom-probai/alice-demo">Demo</a>
+        <a href="#bibtex">BibTeX</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="container teaser" aria-label="Project overview">
+        <figure>
+          <img src="assets/img/banner.jpg" alt="ALICE banner: a Transformer reads context samples and returns a mutual-information estimate" width="1600" height="533">
+          <figcaption>ALICE, the Adaptive Latent In-Context Estimator: one model, trained once on synthetic distributions, estimates the mutual information of an unseen distribution from its samples.</figcaption>
+        </figure>
+      </section>
+
+      <section class="section shaded" aria-labelledby="abstract-title">
+        <div class="container prose">
+          <h2 id="abstract-title">Abstract</h2>
+          <p>
+            Estimating mutual information (MI) from samples is central to many scientific fields,
+            yet modern neural estimators fall short when data is scarce and must be fit anew for
+            every distribution. We present ALICE, a foundation model that removes per-distribution
+            training while achieving competitive accuracy. Trained exclusively on synthetic
+            distributions, ALICE acts as an in-context estimator of rectified-flow velocity fields:
+            conditioned on samples of an unseen distribution, it estimates that distribution's
+            velocity field, and MI follows from a fixed identity that integrates the squared
+            difference between the joint and conditional fields. Validated on a standard benchmark
+            and applied to biology, genetics, and neuroscience data it has never seen, a single
+            model closes the gap with estimators trained separately for each distribution, across
+            data dimensionalities and sample sizes.
+          </p>
+        </div>
+      </section>
+
+      <section class="section container prose" aria-labelledby="method-title">
+        <h2 id="method-title">Method</h2>
+
+        <h3>Mutual information from velocity fields</h3>
+        <p>
+          For \(X\in\mathbb{R}^{d_x}\) and \(Y\in\mathbb{R}^{d_y}\), mutual information is the KL
+          divergence between the joint law and the product of its marginals,
+        </p>
+        <div class="equation">
+          \[
+            \MI(X;Y)=\KL{p_{XY}}{p_X\otimes p_Y}.
+          \]
+        </div>
+        <p>
+          Let \(z_0=(x_0,y_0)\sim p_{XY}\) be a clean joint sample and \(\epsilon\) an independent
+          standard Gaussian perturbation. The rectified-flow interpolant
+          \(z_t=(1-t)\,z_0+t\,\epsilon\), \(t\in[0,1]\), has velocity field
+        </p>
+        <div class="equation">
+          \[
+            \vel_t(z)=\Ex\!\left[\,Z_0-\epsilon \mid Z_t=z\,\right].
+          \]
+        </div>
+        <p>
+          With \(\vel_t(x\mid y_0)\) and \(\vel_t(y\mid x_0)\) the velocity fields of the
+          conditionals \(p_{X\mid Y=y_0}\) and \(p_{Y\mid X=x_0}\), and \(u|_X\), \(u|_Y\) the block
+          selections of a vector, MI is a time integral of squared velocity differences:
+        </p>
+        <div class="equation">
+          \[
+            \MI(X;Y)=\int_0^{1}\frac{1-t}{t}\;
+            \Ex_{x_0,\,y_0,\,\epsilon}\!\left[
+              \Norm{\vel_t(z_t)|_X-\vel_t(x_t\mid y_0)}^2
+              +\Norm{\vel_t(z_t)|_Y-\vel_t(y_t\mid x_0)}^2
+            \right]\d{t}.
+          \]
+        </div>
+
+        <h3>The in-context velocity field</h3>
+        <p>
+          Evaluating this identity normally requires training one model per distribution. ALICE
+          instead amortizes velocity-field estimation: a single Transformer maps a clean context
+          <em>and</em> a query to a velocity,
+        </p>
+        <div class="equation">
+          \[
+            (\ctx,\,z_t,\,t,\,m)\;\longmapsto\;\vmodel(z_t,t,m;\ctx),
+            \qquad \ctx=\bigl\{z^{(k)}\bigr\}_{k=1}^{n},
+          \]
+        </div>
+        <p>
+          where \(\ctx\) holds \(n\) clean samples from the unseen distribution and the mask
+          \(m\in\{0,1\}^d\) marks the coordinates that are diffused. The context determines
+          <em>which</em> field the model represents; the query gives <em>where</em> it is evaluated.
+          Training uses a masked flow-matching objective on synthetic distributions and no MI labels.
+        </p>
+
+        <h3>Monte Carlo estimator</h3>
+        <p>
+          Each draw \(i\) samples a clean point \(z_0^{(i)}\), a time \(t_i\sim\cU[0,1]\), and a
+          perturbation \(\epsilon^{(i)}\) shared by three masked queries, with
+          \(m_{XY}=(\indone_X,\indone_Y)\), \(m_X=(\indone_X,\indzero_Y)\), and
+          \(m_Y=(\indzero_X,\indone_Y)\):
+        </p>
+        <div class="equation">
+          \[
+            \begin{aligned}
+              \widehat v^{(i)} &amp;= \vmodel\bigl(z_{t_i}^{(i)},\,t_i,\,m_{XY};\,\ctx\bigr),\\[0.4em]
+              \widehat v_X^{(i)} &amp;= \vmodel\bigl((x_{t_i}^{(i)},\,y_0^{(i)}),\,t_i,\,m_X;\,\ctx\bigr),\\[0.4em]
+              \widehat v_Y^{(i)} &amp;= \vmodel\bigl((x_0^{(i)},\,y_{t_i}^{(i)}),\,t_i,\,m_Y;\,\ctx\bigr).
+            \end{aligned}
+          \]
+        </div>
+        <p>The Monte Carlo estimator with \(N_{\mathrm{MC}}\) draws is</p>
+        <div class="equation">
+          \[
+            \widehat{\MI}(X;Y)=\frac{1}{N_{\mathrm{MC}}}\sum_{i=1}^{N_{\mathrm{MC}}}\frac{1-t_i}{t_i}
+            \left[
+              \Norm{\bigl(\widehat v^{(i)}-\widehat v_X^{(i)}\bigr)\big|_X}^2
+              +\Norm{\bigl(\widehat v^{(i)}-\widehat v_Y^{(i)}\bigr)\big|_Y}^2
+            \right].
+          \]
+        </div>
+        <p>
+          Everything that depends only on \(\ctx\) is computed once and reused across queries.
+        </p>
+      </section>
+
+      <section class="section shaded" aria-labelledby="quickstart-title">
+        <div class="container prose">
+          <h2 id="quickstart-title">Quickstart</h2>
+          <p>
+            Install with <a href="https://docs.astral.sh/uv/">uv</a>, load a checkpoint, and estimate
+            the MI of joint samples whose columns are split between \(X\) and \(Y\).
+          </p>
+<pre class="code"><code class="language-bash">git clone https://github.com/eurecom-probai/alice.git
+<span class="nb">cd</span> alice
+uv sync --locked</code></pre>
+<pre class="code"><code class="language-python"><span class="kn">import</span> <span class="nn">torch</span>
+<span class="kn">from</span> <span class="nn">alice</span> <span class="kn">import</span> estimate_mi_fast, load_model
+
+model <span class="o">=</span> load_model(<span class="s2">"eurecom-probai/alice-1.0-base"</span>, device<span class="o">=</span><span class="s2">"cpu"</span>)
+
+<span class="c1"># 1024 joint samples of a correlated Gaussian pair; I(X;Y) = -0.5 * log(1 - 0.7**2)</span>
+rho <span class="o">=</span> <span class="mf">0.7</span>
+x <span class="o">=</span> torch<span class="o">.</span>randn(<span class="mi">1024</span>, <span class="mi">1</span>)
+y <span class="o">=</span> rho <span class="o">*</span> x <span class="o">+</span> (<span class="mi">1</span> <span class="o">-</span> rho<span class="o">**</span><span class="mi">2</span>) <span class="o">**</span> <span class="mf">0.5</span> <span class="o">*</span> torch<span class="o">.</span>randn(<span class="mi">1024</span>, <span class="mi">1</span>)
+
+mi, std_err <span class="o">=</span> estimate_mi_fast(
+    model,
+    torch<span class="o">.</span>cat((x, y), dim<span class="o">=</span><span class="mi">1</span>),
+    <span class="nb">slice</span>(<span class="mi">0</span>, <span class="mi">1</span>),   <span class="c1"># columns of X</span>
+    <span class="nb">slice</span>(<span class="mi">1</span>, <span class="mi">2</span>),   <span class="c1"># columns of Y</span>
+    return_std<span class="o">=</span><span class="kc">True</span>,
+)
+<span class="nb">print</span>(<span class="sa">f</span><span class="s2">"</span><span class="si">{</span>mi<span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> +/- </span><span class="si">{</span>std_err<span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> nats"</span>)</code></pre>
+          <p class="note">
+            Checkpoints load custom model code with <code>trust_remote_code=True</code>; review the
+            source and pin a revision.
+          </p>
+        </div>
+      </section>
+
+      <section class="section container" aria-labelledby="models-title">
+        <h2 id="models-title">Models</h2>
+        <p class="prose">
+          Two ALICE 1.0 checkpoints are available on the Hugging Face Hub under the PolyForm
+          Noncommercial License 1.0.0.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th scope="col">Checkpoint</th><th scope="col">Parameters</th><th scope="col">Width</th><th scope="col">Layers</th><th scope="col">Heads</th><th scope="col">Weights</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><a href="https://huggingface.co/eurecom-probai/alice-1.0-small">alice-1.0-small</a></td><td>19.3M</td><td>384</td><td>5</td><td>8</td><td>float32</td></tr>
+              <tr><td><a href="https://huggingface.co/eurecom-probai/alice-1.0-base">alice-1.0-base</a></td><td>85.2M</td><td>768</td><td>6</td><td>12</td><td>float32</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section shaded" aria-labelledby="demo-title">
+        <div class="container">
+          <h2 id="demo-title">Interactive demo</h2>
+          <p class="prose">
+            The <a href="https://huggingface.co/spaces/eurecom-probai/alice-demo">Hugging Face Space</a>
+            runs ALICE 1.0 Small on correlated Gaussian pairs and compares its estimate with the
+            analytic value.
+          </p>
+          <iframe class="demo" src="https://eurecom-probai-alice-demo.hf.space" title="ALICE mutual-information demo" loading="lazy" allow="clipboard-write"></iframe>
+        </div>
+      </section>
+
+      <section class="section container prose" id="bibtex" aria-labelledby="bibtex-title">
+        <h2 id="bibtex-title">BibTeX</h2>
+        <pre><code>@misc{franzese2026alice,
+  author = {Franzese, Giulio and Rossi, Simone and Michiardi, Pietro},
+  title = {{ALICE}: In-context, Zero-shot, Mutual Information Estimation},
+  year = {2026},
+  eprint = {2609.34962},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG},
+  url = {https://arxiv.org/abs/2609.34962},
+}</code></pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>
+        Copyright 2026 <a href="https://www.eurecom.fr/">EURECOM</a>. Code and models are released under the
+        <a href="https://github.com/eurecom-probai/alice/blob/main/LICENSE">PolyForm Noncommercial License 1.0.0</a>.
+        Layout inspired by the
+        <a href="https://github.com/eliahuhorwitz/Academic-project-page-template">Academic Project Page Template</a>.
+      </p>
+    </footer>
+  </body>
+</html>
