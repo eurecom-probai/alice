@@ -74,53 +74,6 @@ matrix of joint samples, and disjoint column slices identifying the two
 variables. The [tutorial notebook](notebooks/alice_mi_tutorial.ipynb) demonstrates
 the fast estimator and its Monte Carlo standard error.
 
-### Optimize inputs with a frozen model
-
-Use `differentiable=True` to return a tensor and differentiate through both
-context and evaluation samples. For example, with a loaded model:
-
-```python
-import torch
-from alice import estimate_mi_fast
-
-model.eval().requires_grad_(False)
-device = next(model.parameters()).device
-base = torch.randn(64, 2, generator=torch.Generator().manual_seed(7)).to(device)
-theta, noise = base[:, :1], base[:, 1:]
-design = torch.tensor(0.5, device=device, requires_grad=True)
-optimizer = torch.optim.Adam([design], lr=0.01)
-
-for _ in range(3):
-    optimizer.zero_grad()
-    observations = design * theta + noise
-    samples = torch.cat((theta, observations), dim=1)
-    mi = estimate_mi_fast(
-        model,
-        samples,
-        slice(0, 1),
-        slice(1, 2),
-        n_context=32,
-        n_t_samples=8,
-        chunk=64,
-        normalize=False,  # caller controls preprocessing
-        differentiable=True,
-        checkpoint_queries=True,
-        generator=torch.Generator().manual_seed(42),
-    )
-    (-mi).backward()  # maximize the estimate
-    optimizer.step()
-```
-
-`.eval()` and frozen weights remain compatible with input autograd. Calls must
-run outside `no_grad()` and `inference_mode()`. Each call builds a fresh graph
-and cache; query checkpointing trades backward recomputation for activation
-memory. See [input-autograd guidance](docs/input-autograd.md) for cache support,
-smooth normalization, precision limits and benchmarks. Ordinary
-calls retain their Python-float results and inference behavior. With
-`normalize=True`, differentiable calls use a smooth context-fitted Gaussian CDF;
-ordinary inference uses hard empirical ranks. These transforms can give different
-MI values. `normalize=False` bypasses normalization in both modes.
-
 ## Citation
 
 
